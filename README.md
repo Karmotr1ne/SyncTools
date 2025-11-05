@@ -2,7 +2,7 @@
 
 **Two-way copy** with `robocopy`: copies **newer files only** in both directions (A→B, B→A), **never deletes**, and skips common junk files; logs to `logs/`.
 
-# Simple Two-Way Sync — Setup & Usage
+## Simple Two-Way Sync — Setup & Usage
 
 This is a **minimal two-way sync** (copy newer files both directions, never delete) using three files:
 

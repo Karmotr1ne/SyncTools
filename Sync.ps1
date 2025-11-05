@@ -1,139 +1,32 @@
 param(
-    [switch]$DryRun  # Try
+  [Parameter(Mandatory=$true)][string]$A,
+  [Parameter(Mandatory=$true)][string]$B,
+  [switch]$DryRun
 )
 
-# === PATH ===
-$pathA = "E:\Data Library\Note"
-$pathB = "F:\Note"
+# Simple two-way copy using robocopy (newer only, no delete)
+$Excludes = @('.git','.svn','.DS_Store','Thumbs.db','~$*')
+$LogDir   = Join-Path $PSScriptRoot 'logs'
+$ts       = Get-Date -Format 'yyyyMMdd_HHmmss'
+$LogFile  = Join-Path $LogDir "sync_$ts.log"
+New-Item -ItemType Directory -Force -Path $LogDir | Out-Null
 
-# Filter
-$excludePatterns = @("*.tmp","*.bak","~*",".DS_Store","Thumbs.db")
+function Log($m){("[{0}] {1}" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'),$m) |
+  Tee-Object -FilePath $LogFile -Append | Out-Null}
 
-# log and conflic
-$scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
-$logDir = Join-Path $scriptRoot "Log"
-New-Item -ItemType Directory -Force -Path $logDir | Out-Null
-$logFile = Join-Path $logDir ("sync_log_{0:yyyyMMdd_HHmmss}.txt" -f (Get-Date))
+Log "=== START ==="
+Log "A: $A"
+Log "B: $B"
+if($DryRun){Log "Mode: DryRun"}else{Log "Mode: Normal"}
 
-function Write-Log($msg) {
-    $line = "[{0:yyyy-MM-dd HH:mm:ss}] {1}" -f (Get-Date), $msg
-    $line | Tee-Object -FilePath $logFile -Append
-}
+$opts = @('/E','/XO','/XN','/R:2','/W:2','/Z','/NP','/NFL','/NDL',"/LOG+:$LogFile")
+if($DryRun){$opts += '/L'}
+if($Excludes.Count){$opts += @('/XA:SH','/XD')+$Excludes+@('/XF')+$Excludes}
 
-function Ensure-Dir($path) {
-    if (-not (Test-Path -LiteralPath $path)) {
-        if (-not $DryRun) { New-Item -ItemType Directory -Force -Path $path | Out-Null }
-        Write-Log "CreateDir: $path"
-    }
-}
+Log "A -> B"
+& robocopy $A $B $opts | Out-Null
+Log "B -> A"
+& robocopy $B $A $opts | Out-Null
 
-function Get-RelPath($full, $root) {
-    $rel = $full.Substring($root.Length).TrimStart('\')
-    return $rel
-}
-
-function Should-Exclude($path) {
-    foreach ($p in $excludePatterns) {
-        if ([System.IO.Path]::GetFileName($path) -like $p) { return $true }
-    }
-    return $false
-}
-
-function Copy-File-Safe($src, $dst) {
-    Ensure-Dir (Split-Path -Parent $dst)
-    if ($DryRun) {
-        Write-Log "COPY (dry): `"$src`" -> `"$dst`""
-    } else {
-        Copy-Item -LiteralPath $src -Destination $dst -Force
-        # time stamp
-        (Get-Item -LiteralPath $dst).LastWriteTimeUtc = (Get-Item -LiteralPath $src).LastWriteTimeUtc
-        Write-Log "COPY: `"$src`" -> `"$dst`""
-    }
-}
-
-function Backup-To-Conflicts($pathToBackup, $rootSide, $relPath) {
-    $conflictRoot = Join-Path $scriptRoot "_conflicts"
-    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-    $dst = Join-Path $conflictRoot (Join-Path $rootSide ($relPath + "." + $stamp))
-    Ensure-Dir (Split-Path -Parent $dst)
-    if ($DryRun) {
-        Write-Log "BACKUP (dry): `"$pathToBackup`" -> `"$dst`""
-    } else {
-        Copy-Item -LiteralPath $pathToBackup -Destination $dst -Force
-        Write-Log "BACKUP: `"$pathToBackup`" -> `"$dst`""
-    }
-}
-
-# Collect
-function Collect($root) {
-    if (-not (Test-Path -LiteralPath $root)) { return @{} }
-    $files = Get-ChildItem -LiteralPath $root -File -Recurse -ErrorAction SilentlyContinue
-    $map = @{}
-    foreach ($f in $files) {
-        if (Should-Exclude $f.FullName) { continue }
-        $rel = Get-RelPath $f.FullName $root
-        $map[$rel] = @{
-            Full = $f.FullName
-            Time = $f.LastWriteTimeUtc
-            Size = $f.Length
-        }
-    }
-    return $map
-}
-
-Write-Log "=== START SYNC ==="
-Write-Log "A: $pathA"
-Write-Log "B: $pathB"
-Write-Log "DryRun: $DryRun"
-Write-Log "Exclude: $($excludePatterns -join ', ')"
-
-$A = Collect $pathA
-$B = Collect $pathB
-$allKeys = New-Object System.Collections.Generic.HashSet[string]
-$A.Keys | ForEach-Object { [void]$allKeys.Add($_) }
-$B.Keys | ForEach-Object { [void]$allKeys.Add($_) }
-
-foreach ($rel in $allKeys) {
-    $inA = $A.ContainsKey($rel)
-    $inB = $B.ContainsKey($rel)
-
-    if (-not $inA -and $inB) {
-        # Copy to A
-        Copy-File-Safe $B[$rel].Full (Join-Path $pathA $rel)
-        continue
-    }
-    if ($inA -and -not $inB) {
-        # Copy to B
-        Copy-File-Safe $A[$rel].Full (Join-Path $pathB $rel)
-        continue
-    }
-    if ($inA -and $inB) {
-        $aMeta = $A[$rel]; $bMeta = $B[$rel]
-        $sameSize = ($aMeta.Size -eq $bMeta.Size)
-        $sameTime = ($aMeta.Time -eq $bMeta.Time)
-
-        if ($sameSize -and $sameTime) {
-            # skip
-            continue
-        }
-
-        # Renew while save old to _conflicts
-        if ($aMeta.Time -gt $bMeta.Time) {
-            # A renew
-            Backup-To-Conflicts $bMeta.Full "B" $rel
-            Copy-File-Safe $aMeta.Full (Join-Path $pathB $rel)
-        } elseif ($bMeta.Time -gt $aMeta.Time) {
-            # B renew
-            Backup-To-Conflicts $aMeta.Full "A" $rel
-            Copy-File-Safe $bMeta.Full (Join-Path $pathA $rel)
-        } else {
-            # Size different: A cover B
-            Backup-To-Conflicts $aMeta.Full "A" $rel
-            Backup-To-Conflicts $bMeta.Full "B" $rel
-            Copy-File-Safe $aMeta.Full (Join-Path $pathB $rel)
-        }
-    }
-}
-
-Write-Log "=== DONE ==="
-Write-Log "Log saved: $logFile"
+Log "=== DONE ==="
+Write-Host "Done. Log: $LogFile"
